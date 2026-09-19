@@ -4,23 +4,41 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu‑22.04
     env:
-      THEOS_PACKAGE_SCHEME: rootless
       THEOS: ${{ github.workspace }}/theos
+      THEOS_PACKAGE_SCHEME: rootless
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      # 这个Action会自动拉完整Theos + Procursus头文件，不用Docker
-      - name: Setup Theos
-        uses: Randomblock1/theos-action@v1
-
-      - name: Compile & Package
+      # 预装系统依赖
+      - name: Install system deps
         run: |
+          sudo apt‑get update
+          sudo apt‑get install -y git curl build‑essential libtool pkg‑config
+
+      # 拉取完整 Procursus‑Theos（带 strap，不是第三方action）
+      - name: Fetch Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git $THEOS
+          cd $THEOS
+          curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install‑theos | bash
+
+      # 关键一步：自动补全 PSHeader（专门解决这个插件找不到 PS.h）
+      - name: Add PSPreferenceLoader headers
+        run: |
+          git clone https://github.com/opa334/PSHeader.git ${{ github.workspace }}/PSHeader
+          echo "THEOS_INCLUDE_PATHS += ${{ github.workspace }}/PSHeader" >> Makefile.local
+
+      - name: Compile tweak
+        run: |
+          export PATH=$THEOS/bin:$PATH
           make clean
           make package FINALPACKAGE=1
 
-      - name: Upload .deb
-        uses: actions/upload-artifact@v4
+      - name: Upload deb
+        uses: actions/upload‑artifact@v4
         with:
           path: packages/*.deb
