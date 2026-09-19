@@ -1,44 +1,137 @@
-name: Build CAHighFPS Rootless
+name: Build CAHighFPS roothide
+
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - '.github/workflows/build.yml'
+      - '**/*.h'
+      - '**/*.m'
+      - '**/*.xm'
+      - '**/*.xmi'
+      - '**/*.plist'
+      - 'Makefile'
+      - 'control'
+      - 'layout/**'
+
+permissions:
+  contents: read
+
+env:
+  XCODE_DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
 
 jobs:
-  build:
-    runs-on: ubuntu‑22.04
+  package:
+    name: Package roothide (macOS 14 / Xcode 15.4)
+    runs-on: macos-14
     env:
+      DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
       THEOS: ${{ github.workspace }}/theos
-      THEOS_PACKAGE_SCHEME: rootless
+      THEOS_PACKAGE_SCHEME: roothide
+      FINALPACKAGE: 1
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # 预装系统依赖
-      - name: Install system deps
+      - name: Select and verify Xcode 15.4 toolchain
         run: |
-          sudo apt‑get update
-          sudo apt‑get install -y git curl build‑essential libtool pkg‑config
+          set -euo pipefail
+          sudo xcode-select -s "$XCODE_DEVELOPER_DIR"
+          test -d "$XCODE_DEVELOPER_DIR"
+          xcode_version="$(xcodebuild -version)"
+          printf '%s\n' "$xcode_version"
+          test "$(printf '%s\n' "$xcode_version" | sed -n '1p')" = "Xcode 15.4"
+          test "$(printf '%s\n' "$xcode_version" | sed -n '2p')" = "Build version 15F31d"
+          clang_version="$(xcrun clang --version)"
+          printf '%s\n' "$clang_version"
+          printf '%s\n' "$clang_version" | grep -Eq 'Apple clang version 15\.0\.0'
+          ld_version="$(xcrun ld -version_details)"
+          printf '%s\n' "$ld_version"
+          printf '%s\n' "$ld_version" | grep -Eq '"version"[[:space:]]*:[[:space:]]*"1053\.12"|PROJECT:ld-1053\.12|ld-1053\.12'
+          system_sdk="$(xcrun --sdk iphoneos --show-sdk-version)"
+          printf 'system_sdk=%s\n' "$system_sdk"
+          test "$system_sdk" = "17.5"
 
-      # 拉取完整 Procursus‑Theos（带 strap，不是第三方action）
-      - name: Fetch Theos
+      - name: Install packaging tools
         run: |
-          git clone --recursive https://github.com/theos/theos.git $THEOS
-          cd $THEOS
-          curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install‑theos | bash
+          set -euo pipefail
+          brew update
+          brew install dpkg ldid make
 
-      # 关键一步：自动补全 PSHeader（专门解决这个插件找不到 PS.h）
-      - name: Add PSPreferenceLoader headers
+      - name: Install Theos (roothide 官方分支)
         run: |
-          git clone https://github.com/opa334/PSHeader.git ${{ github.workspace }}/PSHeader
+          set -euo pipefail
+          git clone --recursive https://github.com/roothide/theos.git "$THEOS"
+
+      # 【CAHighFPS 独有补充：拉取 PSPreferenceLoader 头文件】
+      - name: Fetch PSHeader
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/opa334/PSHeader.git ${{ github.workspace }}/PSHeader
           echo "THEOS_INCLUDE_PATHS += ${{ github.workspace }}/PSHeader" >> Makefile.local
 
-      - name: Compile tweak
+      - name: Install Theos SDK with private frameworks
         run: |
-          export PATH=$THEOS/bin:$PATH
-          make clean
-          make package FINALPACKAGE=1
+          set -euo pipefail
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/theos-sdks
+          git -C /tmp/theos-sdks sparse-checkout set iPhoneOS16.5.sdk
+          mkdir -p "$THEOS/sdks"
+          cp -R /tmp/theos-sdks/iPhoneOS16.5.sdk "$THEOS/sdks/"
 
-      - name: Upload deb
-        uses: actions/upload‑artifact@v4
+      - name: Build package
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/opt/make/libexec/gnubin:$THEOS/bin:$PATH"
+          rm -rf packages artifacts
+          mkdir -p artifacts
+          build_log="$GITHUB_WORKSPACE/artifacts/build.log"
+          make clean SDKVERSION=16.5 2>&1 | tee "$build_log"
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide SDKVERSION=16.5 2>&1 | tee -a "$build_log"
+          if grep -q 'incompatible arm64e ABI compiler' "$build_log"; then
+            echo 'FATAL: incompatible arm64e ABI compiler' >&2
+            exit 1
+          fi
+          deb="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$deb"
+          cp "$deb" artifacts/
+
+      - name: Basic Verify package（去掉HBS硬编码校验，改成通用）
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/opt/make/libexec/gnubin:$THEOS/bin:$PATH"
+          deb="$(find artifacts -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$deb"
+          rm -rf /tmp/cahfps-payload
+          mkdir -p /tmp/cahfps-payload
+          dpkg-deb -x "$deb" /tmp/cahfps-payload
+          dylib="$(find /tmp/cahfps-payload -name 'CAHighFPS.dylib' -type f -print -quit)"
+          test -n "$dylib"
+          for binary in "$dylib"; do
+            xcrun otool -arch arm64e -hv "$binary"
+            xcrun otool -arch arm64e -hv "$binary" | grep -q '[[:space:]]DYLIB[[:space:]]'
+            build_version="$(xcrun vtool -arch arm64e -show-build "$binary")"
+            printf '%s\n' "$build_version"
+            printf '%s\n' "$build_version" | grep -Eq 'minos[[:space:]]+15\.0([[:space:]]|$)'
+          done
+          {
+            printf 'package=%s\n' "$(basename "$deb")"
+            printf 'sha256=%s\n' "$(shasum -a 256 "$deb" | awk '{print $1}')"
+            printf 'size_bytes=%s\n' "$(stat -f '%z' "$deb")"
+            printf 'architectures=%s\n' "$(xcrun lipo -archs "$dylib" | tr '\n' ' ')"
+            printf 'xcode=%s\n' "$(xcodebuild -version | tr '\n' ' ')"
+            printf 'clang=%s\n' "$(xcrun clang --version | sed -n '1p')"
+            printf 'ld=%s\n' "$(xcrun ld -version_details | sed -n 's/[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+            printf 'sdk=%s\n' "16.5 (theos sdks, pinned)"
+            printf 'theos_commit=%s\n' "$(git -C "$THEOS" rev-parse HEAD)"
+          } | tee artifacts/provenance.txt
+
+      - name: Upload deb package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          path: packages/*.deb
+          name: cahighfps-roothide-${{ github.run_id }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
