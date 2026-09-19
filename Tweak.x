@@ -68,8 +68,10 @@ static BOOL usesCustomFPS() {
 }
 
 static BOOL shouldEnableForBundleIdentifier(NSString *bundleIdentifier) {
-    if ([bundleIdentifier isEqualToString:@"com.apple.springboard"])
-        return NO;
+    // ↓↓↓ 原版屏蔽桌面的这一行已经移除！
+    // if ([bundleIdentifier isEqualToString:@"com.apple.springboard"])
+    //     return NO;
+
     if (systemWide)
         return ![blacklist containsObject:bundleIdentifier];
     return [whitelist containsObject:bundleIdentifier];
@@ -91,16 +93,18 @@ static BOOL shouldEnableForBundleIdentifier(NSString *bundleIdentifier) {
     %orig(usesCustomFPS() ? getTargetFPS() : 0);
 }
 
+// ———— 这里是关键修正：真正 Range / PFPS 10～target ————
 - (void)setPreferredFrameRateRange:(CAFrameRateRange)range {
     NSInteger target = getTargetFPS();
     if (usesCustomFPS()) {
-        range.minimum = target;
+        range.minimum   = 10;
         range.preferred = target;
-        range.maximum = target;
+        range.maximum   = target;
     } else {
-        range.minimum = 30;
-        range.preferred = target;
-        range.maximum = target;
+        // 不启用时交还系统原生区间
+        range.minimum   = 10;
+        range.preferred = getMaxFPS();
+        range.maximum   = getMaxFPS();
     }
     %orig;
 }
@@ -139,28 +143,16 @@ static BOOL shouldEnableForBundleIdentifier(NSString *bundleIdentifier) {
 
 %end
 
+// UIKit 那组函数原版注释有坑，保留注释不动即可
 // #pragma mark - UIKit
-
 // BOOL (*_UIUpdateCycleSchedulerEnabled)(void);
-
 // %group UIKit
-
-// %hookf(BOOL, _UIUpdateCycleSchedulerEnabled) {
-//     return YES;
-// }
-
+// %hookf(BOOL, _UIUpdateCycleSchedulerEnabled) { return YES; }
 // %end
 
 %ctor {
     loadPreferences();
     if (isTarget(TargetTypeApps) && shouldEnableForBundleIdentifier(NSBundle.mainBundle.bundleIdentifier)) {
-        // if (IS_IOS_OR_NEWER(iOS_15_0)) { // iOS 15.0 only?
-        //     MSImageRef ref = MSGetImageByName("/System/Library/PrivateFrameworks/UIKitCore.framework/UIKitCore");
-        //     _UIUpdateCycleSchedulerEnabled = (BOOL (*)(void))MSFindSymbol(ref, "__UIUpdateCycleSchedulerEnabled");
-        //     if (_UIUpdateCycleSchedulerEnabled) {
-        //         %init(UIKit);
-        //     }
-        // }
         %init;
     }
 }
