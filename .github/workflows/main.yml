@@ -7,7 +7,7 @@ on:
       - main
       - master
     paths:
-      - '.github/workflows/build.yml'
+      - '.github/workflows/main.yml'
       - '**/*.h'
       - '**/*.m'
       - '**/*.xm'
@@ -59,18 +59,24 @@ jobs:
         run: |
           set -euo pipefail
           brew update
-          brew install dpkg ldid make
+          brew install dpkg ldid make wget unzip
 
-      - name: Install Theos (roothide 官方分支)
+      # 改进：浅克隆 + 分步更新子模块，避开 --recursive 大超时128
+      - name: Install Theos (roothide branch, shallow + submodule safe)
         run: |
           set -euo pipefail
-          git clone --recursive https://github.com/roothide/theos.git "$THEOS"
+          git clone --depth 1 https://github.com/roothide/theos.git "$THEOS"
+          cd "$THEOS"
+          git submodule update --init --depth 1
 
-      # 【CAHighFPS 独有补充：拉取 PSPreferenceLoader 头文件】
-      - name: Fetch PSHeader
+      # 重点修复：不用 git clone PSHeader（极易128），改用 wget 直接下载源码包
+      - name: Fetch PSHeader (zip direct download)
         run: |
           set -euo pipefail
-          git clone --depth 1 https://github.com/opa334/PSHeader.git ${{ github.workspace }}/PSHeader
+          mkdir -p ${{ github.workspace }}/PSHeader
+          wget --timeout=30 -q https://github.com/opa334/PSHeader/archive/refs/heads/master.zip -O /tmp/psh.zip
+          unzip -q /tmp/psh.zip -d /tmp
+          cp -R /tmp/PSHeader-master/* ${{ github.workspace }}/PSHeader/
           echo "THEOS_INCLUDE_PATHS += ${{ github.workspace }}/PSHeader" >> Makefile.local
 
       - name: Install Theos SDK with private frameworks
@@ -98,7 +104,7 @@ jobs:
           test -n "$deb"
           cp "$deb" artifacts/
 
-      - name: Basic Verify package（去掉HBS硬编码校验，改成通用）
+      - name: Basic Verify package
         run: |
           set -euo pipefail
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:$THEOS/bin:$PATH"
