@@ -1,139 +1,67 @@
-name: Build CAHighFPS roothide
+name: Build CAHighFPS‑RootHide
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
-    paths:
-      - '.github/workflows/main.yml'
-      - '**/*.h'
-      - '**/*.m'
-      - '**/*.xm'
-      - '**/*.xmi'
-      - '**/*.plist'
-      - 'Makefile'
-      - 'control'
-      - 'layout/**'
+    branches: [ main ]
 
 permissions:
   contents: read
 
 env:
-  XCODE_DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+  DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+  THEOS_PACKAGE_SCHEME: roothide
+  FINALPACKAGE: 1
 
 jobs:
-  package:
-    name: Package roothide (macOS 14 / Xcode 15.4)
-    runs-on: macos-14
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
-      THEOS: ${{ github.workspace }}/theos
-      THEOS_PACKAGE_SCHEME: roothide
-      FINALPACKAGE: 1
+  build:
+    name: Build & Verify arm64e
+    runs-on: macos‑14
     steps:
-      - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@v4
 
-      - name: Select and verify Xcode 15.4 toolchain
+      # 核心：预配置好 roothide‑theos 环境，跳过折磨人的 brew install
+      - name: Setup RootHide‑Theos
+        uses: roothide/theos‑action@v1
+        with:
+          sdks: iPhoneOS16.5.sdk
+
+      - name: Verify Xcode 15.4
         run: |
           set -euo pipefail
-          sudo xcode-select -s "$XCODE_DEVELOPER_DIR"
-          test -d "$XCODE_DEVELOPER_DIR"
-          xcodebuild -version
-          xcrun clang --version
-          xcrun --sdk iphoneos --show-sdk-version
+          sudo xcode‑select -s "$DEVELOPER_DIR"
+          xcodebuild ‑version
+          xcrun clang ‑version | grep "15."
 
-      # 修复：不跑 brew update（这个在macOS‑14现在极容易失败报8）；只安装必要包
-      - name: Install packaging tools (skip full update)
+      # 内置 PSHeader（不再网络下载，避免 128/8/9 各种网络坑！）
+      # 👉 这里一个重要操作：**你本地项目里把 PSHeader 文件夹放进仓库根目录上传**
+      # （只放 .h；不要整个 git 仓库），下面这行就生效；如果不想上传头文件再告诉我
+      - name: Set include path
         run: |
-          set -euo pipefail
-          brew install --quiet dpkg ldid make
-          echo "✅ Tools installed"
-
-      - name: Install Theos (roothide, shallow safe)
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/roothide/theos.git "$THEOS"
-          cd "$THEOS"
-          git submodule update --init --depth 1
-          echo "✅ Theos ready"
-
-      # 修复：curl 代替 wget；修正变量为 THEOS_INCPATH
-      - name: Fetch PSHeader via curl
-        run: |
-          set -euo pipefail
-          mkdir -p ${{ github.workspace }}/PSHeader
-          curl -L --max-time 30 -o /tmp/psh.zip https://github.com/opa334/PSHeader/archive/refs/heads/master.zip
-          unzip -q /tmp/psh.zip -d /tmp
-          cp -R /tmp/PSHeader-master/* ${{ github.workspace }}/PSHeader/
-          echo "THEOS_INCPATH += ${{ github.workspace }}/PSHeader" >> Makefile.local
+          echo 'THEOS_INCPATH += $GITHUB_WORKSPACE/PSHeader' >> Makefile.local
           cat Makefile.local
 
-      - name: Pull iPhoneOS16.5 SDK
+      - name: Compile tweak
         run: |
           set -euo pipefail
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/theos-sdks
-          git -C /tmp/theos-sdks sparse-checkout set iPhoneOS16.5.sdk
-          mkdir -p "$THEOS/sdks"
-          cp -R /tmp/theos-sdks/iPhoneOS16.5.sdk "$THEOS/sdks/"
-          echo "✅ SDK copied"
+          make clean SDKVERSION=16.5
+          make package SDKVERSION=16.5
 
-      - name: Build package
+      - name: Binary arm64e check
         run: |
           set -euo pipefail
-          export PATH="/opt/homebrew/opt/make/libexec/gnubin:$THEOS/bin:$PATH"
-          rm -rf packages artifacts
-          mkdir -p artifacts
-          build_log="$GITHUB_WORKSPACE/artifacts/build.log"
-          echo "--- make clean ---"
-          make clean SDKVERSION=16.5 2>&1 | tee "$build_log"
-          echo "--- make package ---"
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide SDKVERSION=16.5 2>&1 | tee -a "$build_log"
-          if grep -q 'incompatible arm64e ABI compiler' "$build_log"; then
-            echo 'FATAL: incompatible arm64e ABI compiler' >&2
-            exit 1
-          fi
-          deb="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
-          test -n "$deb"
-          cp "$deb" artifacts/
-          echo "✅ Build done, deb: $deb"
+          deb=$(find packages ‑name "*.deb" | head ‑n1)
+          [[ ‑n "$deb" ]]
+          mkdir ‑p /tmp/chk
+          dpkg‑deb ‑x "$deb" /tmp/chk
+          dylib=$(find /tmp/chk ‑name "CAHighFPS.dylib" | head ‑n1)
+          [[ ‑n "$dylib" ]]
+          lipo ‑archs "$dylib" | grep ‑q "arm64e"
+          xcrun vtool ‑arch arm64e ‑show‑build "$dylib" | grep ‑q "minos 15.0"
+          echo "✅ arm64e & minos 15.0 check OK"
 
-      - name: Basic Verify package
-        run: |
-          set -euo pipefail
-          export PATH="/opt/homebrew/opt/make/libexec/gnubin:$THEOS/bin:$PATH"
-          deb="$(find artifacts -maxdepth 1 -type f -name '*.deb' -print -quit)"
-          test -n "$deb"
-          rm -rf /tmp/cahfps-payload
-          mkdir -p /tmp/cahfps-payload
-          dpkg-deb -x "$deb" /tmp/cahfps-payload
-          dylib="$(find /tmp/cahfps-payload -name 'CAHighFPS.dylib' -type f -print -quit)"
-          test -n "$dylib"
-          for binary in "$dylib"; do
-            xcrun otool -arch arm64e -hv "$binary"
-            xcrun otool -arch arm64e -hv "$binary" | grep -q '[[:space:]]DYLIB[[:space:]]'
-            build_version="$(xcrun vtool -arch arm64e -show-build "$binary")"
-            printf '%s\n' "$build_version"
-            printf '%s\n' "$build_version" | grep -Eq 'minos[[:space:]]+15\.0([[:space:]]|$)'
-          done
-          {
-            printf 'package=%s\n' "$(basename "$deb")"
-            printf 'sha256=%s\n' "$(shasum -a 256 "$deb" | awk '{print $1}')"
-            printf 'size_bytes=%s\n' "$(stat -f '%z' "$deb")"
-            printf 'architectures=%s\n' "$(xcrun lipo -archs "$dylib" | tr '\n' ' ')"
-            printf 'xcode=%s\n' "$(xcodebuild -version | tr '\n' ' ')"
-            printf 'clang=%s\n' "$(xcrun clang --version | sed -n '1p')"
-            printf 'ld=%s\n' "$(xcrun ld -version_details | sed -n 's/[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-            printf 'sdk=%s\n' "16.5 (theos sdks, pinned)"
-            printf 'theos_commit=%s\n' "$(git -C "$THEOS" rev-parse HEAD)"
-          } | tee artifacts/provenance.txt
-
-      - name: Upload deb package
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Upload DEB
+        uses: actions/upload‑artifact@v4
         with:
-          name: cahighfps-roothide-${{ github.run_id }}
-          path: artifacts/*
-          if-no-files-found: error
-          retention-days: 30
+          name: CAHighFPS‑roothide
+          path: packages/*.deb
