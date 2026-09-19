@@ -5,18 +5,19 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/theos/theos:latest
+      env:
+        THEOS_PACKAGE_SCHEME: rootless
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Theos‑Procursus
-        uses: theos/theos-action@v1
-        with:
-          scheme: rootless
+      - name: Build tweak
+        run: |
+          make clean
+          make package FINALPACKAGE=1
 
-      - name: make package
-        run: make package FINALPACKAGE=1
-
-      - name: Upload deb
+      - name: Upload deb artifact
         uses: actions/upload-artifact@v4
         with:
-          path: ./packages/*.deb
+          path: packages/*.deb
