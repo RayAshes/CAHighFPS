@@ -5,19 +5,22 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/theos/theos:latest
-      env:
-        THEOS_PACKAGE_SCHEME: rootless
+    env:
+      THEOS_PACKAGE_SCHEME: rootless
+      THEOS: ${{ github.workspace }}/theos
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build tweak
+      # 这个Action会自动拉完整Theos + Procursus头文件，不用Docker
+      - name: Setup Theos
+        uses: Randomblock1/theos-action@v1
+
+      - name: Compile & Package
         run: |
           make clean
           make package FINALPACKAGE=1
 
-      - name: Upload deb artifact
+      - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
           path: packages/*.deb
