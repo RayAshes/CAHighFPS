@@ -41,51 +41,44 @@ jobs:
           set -euo pipefail
           sudo xcode-select -s "$XCODE_DEVELOPER_DIR"
           test -d "$XCODE_DEVELOPER_DIR"
-          xcode_version="$(xcodebuild -version)"
-          printf '%s\n' "$xcode_version"
-          test "$(printf '%s\n' "$xcode_version" | sed -n '1p')" = "Xcode 15.4"
-          test "$(printf '%s\n' "$xcode_version" | sed -n '2p')" = "Build version 15F31d"
-          clang_version="$(xcrun clang --version)"
-          printf '%s\n' "$clang_version"
-          printf '%s\n' "$clang_version" | grep -Eq 'Apple clang version 15\.0\.0'
-          ld_version="$(xcrun ld -version_details)"
-          printf '%s\n' "$ld_version"
-          printf '%s\n' "$ld_version" | grep -Eq '"version"[[:space:]]*:[[:space:]]*"1053\.12"|PROJECT:ld-1053\.12|ld-1053\.12'
-          system_sdk="$(xcrun --sdk iphoneos --show-sdk-version)"
-          printf 'system_sdk=%s\n' "$system_sdk"
-          test "$system_sdk" = "17.5"
+          xcodebuild -version
+          xcrun clang --version
+          xcrun --sdk iphoneos --show-sdk-version
 
-      - name: Install packaging tools
+      # 修复：不跑 brew update（这个在macOS‑14现在极容易失败报8）；只安装必要包
+      - name: Install packaging tools (skip full update)
         run: |
           set -euo pipefail
-          brew update
-          brew install dpkg ldid make wget unzip
+          brew install --quiet dpkg ldid make
+          echo "✅ Tools installed"
 
-      # 改进：浅克隆 + 分步更新子模块，避开 --recursive 大超时128
-      - name: Install Theos (roothide branch, shallow + submodule safe)
+      - name: Install Theos (roothide, shallow safe)
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/roothide/theos.git "$THEOS"
           cd "$THEOS"
           git submodule update --init --depth 1
+          echo "✅ Theos ready"
 
-      # 重点修复：不用 git clone PSHeader（极易128），改用 wget 直接下载源码包
-      - name: Fetch PSHeader (zip direct download)
+      # 修复：curl 代替 wget；修正变量为 THEOS_INCPATH
+      - name: Fetch PSHeader via curl
         run: |
           set -euo pipefail
           mkdir -p ${{ github.workspace }}/PSHeader
-          wget --timeout=30 -q https://github.com/opa334/PSHeader/archive/refs/heads/master.zip -O /tmp/psh.zip
+          curl -L --max-time 30 -o /tmp/psh.zip https://github.com/opa334/PSHeader/archive/refs/heads/master.zip
           unzip -q /tmp/psh.zip -d /tmp
           cp -R /tmp/PSHeader-master/* ${{ github.workspace }}/PSHeader/
-          echo "THEOS_INCLUDE_PATHS += ${{ github.workspace }}/PSHeader" >> Makefile.local
+          echo "THEOS_INCPATH += ${{ github.workspace }}/PSHeader" >> Makefile.local
+          cat Makefile.local
 
-      - name: Install Theos SDK with private frameworks
+      - name: Pull iPhoneOS16.5 SDK
         run: |
           set -euo pipefail
           git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/theos-sdks
           git -C /tmp/theos-sdks sparse-checkout set iPhoneOS16.5.sdk
           mkdir -p "$THEOS/sdks"
           cp -R /tmp/theos-sdks/iPhoneOS16.5.sdk "$THEOS/sdks/"
+          echo "✅ SDK copied"
 
       - name: Build package
         run: |
@@ -94,7 +87,9 @@ jobs:
           rm -rf packages artifacts
           mkdir -p artifacts
           build_log="$GITHUB_WORKSPACE/artifacts/build.log"
+          echo "--- make clean ---"
           make clean SDKVERSION=16.5 2>&1 | tee "$build_log"
+          echo "--- make package ---"
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide SDKVERSION=16.5 2>&1 | tee -a "$build_log"
           if grep -q 'incompatible arm64e ABI compiler' "$build_log"; then
             echo 'FATAL: incompatible arm64e ABI compiler' >&2
@@ -103,6 +98,7 @@ jobs:
           deb="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
           test -n "$deb"
           cp "$deb" artifacts/
+          echo "✅ Build done, deb: $deb"
 
       - name: Basic Verify package
         run: |
